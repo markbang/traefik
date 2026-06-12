@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	netv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -12,6 +13,16 @@ import (
 func Test_detectChanges(t *testing.T) {
 	portA := int32(80)
 	portB := int32(8080)
+	portNameA := "http"
+	portNameB := "admin"
+	appProtocolA := "http"
+	appProtocolB := "h2c"
+	ready := true
+	notReady := false
+	serving := true
+	terminating := true
+	protocolTCP := corev1.ProtocolTCP
+	protocolUDP := corev1.ProtocolUDP
 	tests := []struct {
 		name   string
 		oldObj any
@@ -146,6 +157,67 @@ func Test_detectChanges(t *testing.T) {
 			},
 		},
 		{
+			name: "With same port values",
+			oldObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Ports: []discoveryv1.EndpointPort{{
+					Name:        &portNameA,
+					Port:        &portA,
+					Protocol:    &protocolTCP,
+					AppProtocol: &appProtocolA,
+				}},
+			},
+			newObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Ports: []discoveryv1.EndpointPort{{
+					Name:        &portNameA,
+					Port:        &portA,
+					Protocol:    &protocolTCP,
+					AppProtocol: &appProtocolA,
+				}},
+			},
+		},
+		{
+			name: "With different service name labels",
+			oldObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						discoveryv1.LabelServiceName: "svc-a",
+					},
+				},
+			},
+			newObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						discoveryv1.LabelServiceName: "svc-b",
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "With different address types",
+			oldObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				AddressType: discoveryv1.AddressTypeIPv4,
+			},
+			newObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				AddressType: discoveryv1.AddressTypeIPv6,
+			},
+			want: true,
+		},
+		{
 			name: "With different len of endpoints",
 			oldObj: &discoveryv1.EndpointSlice{
 				ObjectMeta: metav1.ObjectMeta{
@@ -182,6 +254,129 @@ func Test_detectChanges(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "With different endpoint ready condition",
+			oldObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Endpoints: []discoveryv1.Endpoint{{
+					Addresses: []string{"10.10.10.10"},
+					Conditions: discoveryv1.EndpointConditions{
+						Ready: &ready,
+					},
+				}},
+			},
+			newObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Endpoints: []discoveryv1.Endpoint{{
+					Addresses: []string{"10.10.10.10"},
+					Conditions: discoveryv1.EndpointConditions{
+						Ready: &notReady,
+					},
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "With different endpoint serving condition",
+			oldObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Endpoints: []discoveryv1.Endpoint{{
+					Addresses: []string{"10.10.10.10"},
+				}},
+			},
+			newObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Endpoints: []discoveryv1.Endpoint{{
+					Addresses: []string{"10.10.10.10"},
+					Conditions: discoveryv1.EndpointConditions{
+						Serving: &serving,
+					},
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "With different endpoint terminating condition",
+			oldObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Endpoints: []discoveryv1.Endpoint{{
+					Addresses: []string{"10.10.10.10"},
+				}},
+			},
+			newObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Endpoints: []discoveryv1.Endpoint{{
+					Addresses: []string{"10.10.10.10"},
+					Conditions: discoveryv1.EndpointConditions{
+						Terminating: &terminating,
+					},
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "Node with same internal and external addresses",
+			oldObj: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Status: corev1.NodeStatus{
+					Addresses: []corev1.NodeAddress{
+						{Type: corev1.NodeInternalIP, Address: "10.0.0.1"},
+						{Type: corev1.NodeExternalIP, Address: "192.0.2.1"},
+						{Type: corev1.NodeHostName, Address: "node-a"},
+					},
+				},
+			},
+			newObj: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Status: corev1.NodeStatus{
+					Addresses: []corev1.NodeAddress{
+						{Type: corev1.NodeHostName, Address: "node-b"},
+						{Type: corev1.NodeExternalIP, Address: "192.0.2.1"},
+						{Type: corev1.NodeInternalIP, Address: "10.0.0.1"},
+					},
+				},
+			},
+		},
+		{
+			name: "Node with different internal address",
+			oldObj: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Status: corev1.NodeStatus{
+					Addresses: []corev1.NodeAddress{
+						{Type: corev1.NodeInternalIP, Address: "10.0.0.1"},
+					},
+				},
+			},
+			newObj: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Status: corev1.NodeStatus{
+					Addresses: []corev1.NodeAddress{
+						{Type: corev1.NodeInternalIP, Address: "10.0.0.2"},
+					},
+				},
+			},
+			want: true,
+		},
+		{
 			name: "With different len of ports",
 			oldObj: &discoveryv1.EndpointSlice{
 				ObjectMeta: metav1.ObjectMeta{
@@ -194,6 +389,26 @@ func Test_detectChanges(t *testing.T) {
 					ResourceVersion: "2",
 				},
 				Ports: []discoveryv1.EndpointPort{{}},
+			},
+			want: true,
+		},
+		{
+			name: "With different port names",
+			oldObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Ports: []discoveryv1.EndpointPort{{
+					Name: &portNameA,
+				}},
+			},
+			newObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Ports: []discoveryv1.EndpointPort{{
+					Name: &portNameB,
+				}},
 			},
 			want: true,
 		},
@@ -213,6 +428,46 @@ func Test_detectChanges(t *testing.T) {
 				},
 				Ports: []discoveryv1.EndpointPort{{
 					Port: &portB,
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "With different port protocols",
+			oldObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Ports: []discoveryv1.EndpointPort{{
+					Protocol: &protocolTCP,
+				}},
+			},
+			newObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Ports: []discoveryv1.EndpointPort{{
+					Protocol: &protocolUDP,
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "With different port app protocols",
+			oldObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Ports: []discoveryv1.EndpointPort{{
+					AppProtocol: &appProtocolA,
+				}},
+			},
+			newObj: &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Ports: []discoveryv1.EndpointPort{{
+					AppProtocol: &appProtocolB,
 				}},
 			},
 			want: true,
