@@ -1,9 +1,14 @@
 package k8s
 
 import (
+	"reflect"
+
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatev1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatev1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatev1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 // ResourceEventHandler handles Add, Update or Delete Events for resources.
@@ -54,6 +59,36 @@ func objChanged(oldObj, newObj any) bool {
 
 	if _, ok := oldObj.(*corev1.Node); ok {
 		return nodeChanged(oldObj.(*corev1.Node), newObj.(*corev1.Node))
+	}
+
+	switch oldObj := oldObj.(type) {
+	case *corev1.Namespace:
+		return namespaceChanged(oldObj, newObj.(*corev1.Namespace))
+	case *corev1.Service:
+		return serviceChanged(oldObj, newObj.(*corev1.Service))
+	case *corev1.Secret:
+		return secretChanged(oldObj, newObj.(*corev1.Secret))
+	case *corev1.ConfigMap:
+		return configMapChanged(oldObj, newObj.(*corev1.ConfigMap))
+	}
+
+	switch oldObj := oldObj.(type) {
+	case *gatev1.GatewayClass:
+		return gatewayClassChanged(oldObj, newObj.(*gatev1.GatewayClass))
+	case *gatev1.Gateway:
+		return gatewayChanged(oldObj, newObj.(*gatev1.Gateway))
+	case *gatev1.HTTPRoute:
+		return httpRouteChanged(oldObj, newObj.(*gatev1.HTTPRoute))
+	case *gatev1.GRPCRoute:
+		return grpcRouteChanged(oldObj, newObj.(*gatev1.GRPCRoute))
+	case *gatev1.TLSRoute:
+		return tlsRouteChanged(oldObj, newObj.(*gatev1.TLSRoute))
+	case *gatev1.BackendTLSPolicy:
+		return backendTLSPolicyChanged(oldObj, newObj.(*gatev1.BackendTLSPolicy))
+	case *gatev1alpha2.TCPRoute:
+		return tcpRouteChanged(oldObj, newObj.(*gatev1alpha2.TCPRoute))
+	case *gatev1beta1.ReferenceGrant:
+		return referenceGrantChanged(oldObj, newObj.(*gatev1beta1.ReferenceGrant))
 	}
 
 	return true
@@ -169,4 +204,59 @@ func nodeAddressSet(addresses []corev1.NodeAddress) map[corev1.NodeAddress]struc
 	}
 
 	return result
+}
+
+func namespaceChanged(a, b *corev1.Namespace) bool {
+	return !reflect.DeepEqual(a.Labels, b.Labels)
+}
+
+func serviceChanged(a, b *corev1.Service) bool {
+	return a.Generation != b.Generation ||
+		!reflect.DeepEqual(a.Spec, b.Spec) ||
+		!reflect.DeepEqual(a.Annotations, b.Annotations) ||
+		!reflect.DeepEqual(a.Status.LoadBalancer, b.Status.LoadBalancer)
+}
+
+func secretChanged(a, b *corev1.Secret) bool {
+	return a.Type != b.Type ||
+		!ptrEqual(a.Immutable, b.Immutable) ||
+		!reflect.DeepEqual(a.Data, b.Data)
+}
+
+func configMapChanged(a, b *corev1.ConfigMap) bool {
+	return !ptrEqual(a.Immutable, b.Immutable) ||
+		!reflect.DeepEqual(a.Data, b.Data) ||
+		!reflect.DeepEqual(a.BinaryData, b.BinaryData)
+}
+
+func gatewayClassChanged(a, b *gatev1.GatewayClass) bool {
+	return a.Generation != b.Generation || !reflect.DeepEqual(a.Spec, b.Spec)
+}
+
+func gatewayChanged(a, b *gatev1.Gateway) bool {
+	return a.Generation != b.Generation || !reflect.DeepEqual(a.Spec, b.Spec)
+}
+
+func httpRouteChanged(a, b *gatev1.HTTPRoute) bool {
+	return a.Generation != b.Generation || !reflect.DeepEqual(a.Spec, b.Spec)
+}
+
+func grpcRouteChanged(a, b *gatev1.GRPCRoute) bool {
+	return a.Generation != b.Generation || !reflect.DeepEqual(a.Spec, b.Spec)
+}
+
+func tlsRouteChanged(a, b *gatev1.TLSRoute) bool {
+	return a.Generation != b.Generation || !reflect.DeepEqual(a.Spec, b.Spec)
+}
+
+func backendTLSPolicyChanged(a, b *gatev1.BackendTLSPolicy) bool {
+	return a.Generation != b.Generation || !reflect.DeepEqual(a.Spec, b.Spec)
+}
+
+func tcpRouteChanged(a, b *gatev1alpha2.TCPRoute) bool {
+	return a.Generation != b.Generation || !reflect.DeepEqual(a.Spec, b.Spec)
+}
+
+func referenceGrantChanged(a, b *gatev1beta1.ReferenceGrant) bool {
+	return a.Generation != b.Generation || !reflect.DeepEqual(a.Spec, b.Spec)
 }

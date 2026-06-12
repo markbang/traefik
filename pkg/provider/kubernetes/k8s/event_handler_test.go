@@ -8,6 +8,8 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	netv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatev1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatev1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 func Test_detectChanges(t *testing.T) {
@@ -377,6 +379,331 @@ func Test_detectChanges(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "Service with metadata-only update",
+			oldObj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "10.0.0.10",
+					Ports:     []corev1.ServicePort{{Port: 80}},
+				},
+			},
+			newObj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "2",
+					Labels:          map[string]string{"changed": "true"},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "10.0.0.10",
+					Ports:     []corev1.ServicePort{{Port: 80}},
+				},
+			},
+		},
+		{
+			name: "Service with spec update",
+			oldObj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "10.0.0.10",
+					Ports:     []corev1.ServicePort{{Port: 80}},
+				},
+			},
+			newObj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      2,
+					ResourceVersion: "2",
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "10.0.0.10",
+					Ports:     []corev1.ServicePort{{Port: 8080}},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "Service with annotation update",
+			oldObj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: corev1.ServiceSpec{ClusterIP: "10.0.0.10"},
+			},
+			newObj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "2",
+					Annotations:     map[string]string{"traefik.io/service.nativelb": "true"},
+				},
+				Spec: corev1.ServiceSpec{ClusterIP: "10.0.0.10"},
+			},
+			want: true,
+		},
+		{
+			name: "Secret with metadata-only update",
+			oldObj: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Data: map[string][]byte{"tls.crt": []byte("cert")},
+			},
+			newObj: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+					Labels:          map[string]string{"changed": "true"},
+				},
+				Data: map[string][]byte{"tls.crt": []byte("cert")},
+			},
+		},
+		{
+			name: "Secret with data update",
+			oldObj: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Data: map[string][]byte{"tls.crt": []byte("cert")},
+			},
+			newObj: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Data: map[string][]byte{"tls.crt": []byte("new-cert")},
+			},
+			want: true,
+		},
+		{
+			name: "ConfigMap with metadata-only update",
+			oldObj: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Data: map[string]string{"ca.crt": "cert"},
+			},
+			newObj: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+					Labels:          map[string]string{"changed": "true"},
+				},
+				Data: map[string]string{"ca.crt": "cert"},
+			},
+		},
+		{
+			name: "ConfigMap with data update",
+			oldObj: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+				},
+				Data: map[string]string{"ca.crt": "cert"},
+			},
+			newObj: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+				},
+				Data: map[string]string{"ca.crt": "new-cert"},
+			},
+			want: true,
+		},
+		{
+			name: "Namespace with metadata-only update",
+			oldObj: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+					Labels:          map[string]string{"team": "edge"},
+				},
+			},
+			newObj: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+					Labels:          map[string]string{"team": "edge"},
+					Annotations:     map[string]string{"changed": "true"},
+				},
+			},
+		},
+		{
+			name: "Namespace with label update",
+			oldObj: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "1",
+					Labels:          map[string]string{"team": "edge"},
+				},
+			},
+			newObj: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: "2",
+					Labels:          map[string]string{"team": "platform"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "HTTPRoute with status-only update",
+			oldObj: &gatev1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: gatev1.HTTPRouteSpec{
+					CommonRouteSpec: gatev1.CommonRouteSpec{
+						ParentRefs: []gatev1.ParentReference{{Name: "gateway"}},
+					},
+				},
+			},
+			newObj: &gatev1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "2",
+				},
+				Spec: gatev1.HTTPRouteSpec{
+					CommonRouteSpec: gatev1.CommonRouteSpec{
+						ParentRefs: []gatev1.ParentReference{{Name: "gateway"}},
+					},
+				},
+				Status: gatev1.HTTPRouteStatus{
+					RouteStatus: gatev1.RouteStatus{
+						Parents: []gatev1.RouteParentStatus{{ControllerName: "traefik.io/gateway-controller"}},
+					},
+				},
+			},
+		},
+		{
+			name: "HTTPRoute with spec update",
+			oldObj: &gatev1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: gatev1.HTTPRouteSpec{
+					CommonRouteSpec: gatev1.CommonRouteSpec{
+						ParentRefs: []gatev1.ParentReference{{Name: "gateway-a"}},
+					},
+				},
+			},
+			newObj: &gatev1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      2,
+					ResourceVersion: "2",
+				},
+				Spec: gatev1.HTTPRouteSpec{
+					CommonRouteSpec: gatev1.CommonRouteSpec{
+						ParentRefs: []gatev1.ParentReference{{Name: "gateway-b"}},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "Gateway with status-only update",
+			oldObj: &gatev1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: gatev1.GatewaySpec{
+					GatewayClassName: "traefik",
+					Listeners: []gatev1.Listener{{
+						Name:     "web",
+						Port:     80,
+						Protocol: gatev1.HTTPProtocolType,
+					}},
+				},
+			},
+			newObj: &gatev1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "2",
+				},
+				Spec: gatev1.GatewaySpec{
+					GatewayClassName: "traefik",
+					Listeners: []gatev1.Listener{{
+						Name:     "web",
+						Port:     80,
+						Protocol: gatev1.HTTPProtocolType,
+					}},
+				},
+				Status: gatev1.GatewayStatus{
+					Listeners: []gatev1.ListenerStatus{{Name: "web", AttachedRoutes: 10}},
+				},
+			},
+		},
+		{
+			name: "GatewayClass with status-only update",
+			oldObj: &gatev1.GatewayClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: gatev1.GatewayClassSpec{
+					ControllerName: "traefik.io/gateway-controller",
+				},
+			},
+			newObj: &gatev1.GatewayClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "2",
+				},
+				Spec: gatev1.GatewayClassSpec{
+					ControllerName: "traefik.io/gateway-controller",
+				},
+				Status: gatev1.GatewayClassStatus{
+					Conditions: []metav1.Condition{{Type: string(gatev1.GatewayClassConditionStatusAccepted)}},
+				},
+			},
+		},
+		{
+			name: "ReferenceGrant with metadata-only update",
+			oldObj: &gatev1beta1.ReferenceGrant{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: gatev1beta1.ReferenceGrantSpec{
+					From: []gatev1beta1.ReferenceGrantFrom{{Kind: "HTTPRoute", Namespace: "default"}},
+					To:   []gatev1beta1.ReferenceGrantTo{{Kind: "Service"}},
+				},
+			},
+			newObj: &gatev1beta1.ReferenceGrant{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "2",
+					Labels:          map[string]string{"changed": "true"},
+				},
+				Spec: gatev1beta1.ReferenceGrantSpec{
+					From: []gatev1beta1.ReferenceGrantFrom{{Kind: "HTTPRoute", Namespace: "default"}},
+					To:   []gatev1beta1.ReferenceGrantTo{{Kind: "Service"}},
+				},
+			},
+		},
+		{
+			name: "ReferenceGrant with spec update",
+			oldObj: &gatev1beta1.ReferenceGrant{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: gatev1beta1.ReferenceGrantSpec{
+					From: []gatev1beta1.ReferenceGrantFrom{{Kind: "HTTPRoute", Namespace: "default"}},
+					To:   []gatev1beta1.ReferenceGrantTo{{Kind: "Service"}},
+				},
+			},
+			newObj: &gatev1beta1.ReferenceGrant{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      2,
+					ResourceVersion: "2",
+				},
+				Spec: gatev1beta1.ReferenceGrantSpec{
+					From: []gatev1beta1.ReferenceGrantFrom{{Kind: "GRPCRoute", Namespace: "default"}},
+					To:   []gatev1beta1.ReferenceGrantTo{{Kind: "Service"}},
+				},
+			},
+			want: true,
+		},
+		{
 			name: "With different len of ports",
 			oldObj: &discoveryv1.EndpointSlice{
 				ObjectMeta: metav1.ObjectMeta{
@@ -480,4 +807,112 @@ func Test_detectChanges(t *testing.T) {
 			assert.Equal(t, test.want, objChanged(test.oldObj, test.newObj))
 		})
 	}
+}
+
+func TestResourceEventHandlerIgnoresNoopUpdates(t *testing.T) {
+	testCases := []struct {
+		name   string
+		oldObj any
+		newObj any
+	}{
+		{
+			name: "HTTPRoute status-only update",
+			oldObj: &gatev1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: gatev1.HTTPRouteSpec{
+					CommonRouteSpec: gatev1.CommonRouteSpec{
+						ParentRefs: []gatev1.ParentReference{{Name: "gateway"}},
+					},
+				},
+			},
+			newObj: &gatev1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "2",
+				},
+				Spec: gatev1.HTTPRouteSpec{
+					CommonRouteSpec: gatev1.CommonRouteSpec{
+						ParentRefs: []gatev1.ParentReference{{Name: "gateway"}},
+					},
+				},
+				Status: gatev1.HTTPRouteStatus{
+					RouteStatus: gatev1.RouteStatus{
+						Parents: []gatev1.RouteParentStatus{{ControllerName: "traefik.io/gateway-controller"}},
+					},
+				},
+			},
+		},
+		{
+			name: "Service metadata-only update",
+			oldObj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "1",
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "10.0.0.10",
+					Ports:     []corev1.ServicePort{{Port: 80}},
+				},
+			},
+			newObj: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation:      1,
+					ResourceVersion: "2",
+					Labels:          map[string]string{"changed": "true"},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "10.0.0.10",
+					Ports:     []corev1.ServicePort{{Port: 80}},
+				},
+			},
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			events := make(chan any, 1)
+			handler := &ResourceEventHandler{Ev: events}
+
+			handler.OnUpdate(test.oldObj, test.newObj)
+
+			assert.Empty(t, events)
+		})
+	}
+}
+
+func TestResourceEventHandlerEmitsMaterialUpdates(t *testing.T) {
+	events := make(chan any, 1)
+	handler := &ResourceEventHandler{Ev: events}
+
+	oldObj := &gatev1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Generation:      1,
+			ResourceVersion: "1",
+		},
+		Spec: gatev1.HTTPRouteSpec{
+			CommonRouteSpec: gatev1.CommonRouteSpec{
+				ParentRefs: []gatev1.ParentReference{{Name: "gateway-a"}},
+			},
+		},
+	}
+	newObj := &gatev1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Generation:      2,
+			ResourceVersion: "2",
+		},
+		Spec: gatev1.HTTPRouteSpec{
+			CommonRouteSpec: gatev1.CommonRouteSpec{
+				ParentRefs: []gatev1.ParentReference{{Name: "gateway-b"}},
+			},
+		},
+	}
+
+	handler.OnUpdate(oldObj, newObj)
+
+	assert.Same(t, newObj, <-events)
 }
