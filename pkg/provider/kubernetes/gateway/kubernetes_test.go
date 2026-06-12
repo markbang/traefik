@@ -24,6 +24,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	discoveryfake "k8s.io/client-go/discovery/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	kscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
@@ -175,6 +176,37 @@ func TestClientStripsManagedFields(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, routes, 1)
 	assert.Empty(t, routes[0].ManagedFields)
+}
+
+func TestClientSkipsMissingTLSRouteCRD(t *testing.T) {
+	kubeClient := kubefake.NewClientset()
+	gwClient := newGatewaySimpleClientSet(t)
+
+	discovery, ok := gwClient.Discovery().(*discoveryfake.FakeDiscovery)
+	require.True(t, ok)
+	discovery.Resources = []*metav1.APIResourceList{{
+		GroupVersion: gatev1.GroupVersion.String(),
+		APIResources: []metav1.APIResource{
+			{Name: "gatewayclasses", Namespaced: false, Kind: "GatewayClass"},
+			{Name: "gateways", Namespaced: true, Kind: "Gateway"},
+			{Name: "httproutes", Namespaced: true, Kind: "HTTPRoute"},
+			{Name: "grpcroutes", Namespaced: true, Kind: "GRPCRoute"},
+			{Name: "backendtlspolicies", Namespaced: true, Kind: "BackendTLSPolicy"},
+		},
+	}}
+
+	client := newClientImpl(kubeClient, gwClient)
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	_, err := client.WatchAll(nil, stopCh)
+	require.NoError(t, err)
+	assert.False(t, client.hasTLSRoutes)
+
+	routes, err := client.ListTLSRoutes()
+	require.NoError(t, err)
+	assert.Empty(t, routes)
 }
 
 func BenchmarkClientListEndpointSlicesForService(b *testing.B) {
