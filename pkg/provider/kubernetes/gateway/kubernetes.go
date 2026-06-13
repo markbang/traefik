@@ -158,11 +158,7 @@ func newGatewayListenerIndex(listeners []gatewayListener) gatewayListenerIndex {
 	return index
 }
 
-func (i gatewayListenerIndex) matching(routeNamespace string, parentRefs []gatev1.ParentReference) []gatewayListener {
-	return i.matchingInto(nil, routeNamespace, parentRefs)
-}
-
-func (i gatewayListenerIndex) matchingInto(listeners []gatewayListener, routeNamespace string, parentRefs []gatev1.ParentReference) []gatewayListener {
+func (i gatewayListenerIndex) matchingInto(dst []gatewayListener, routeNamespace string, parentRefs []gatev1.ParentReference) []gatewayListener {
 	for _, parentRef := range parentRefs {
 		if ptr.Deref(parentRef.Group, gatev1.GroupName) != gatev1.GroupName {
 			continue
@@ -176,10 +172,11 @@ func (i gatewayListenerIndex) matchingInto(listeners []gatewayListener, routeNam
 			Namespace: string(ptr.Deref(parentRef.Namespace, gatev1.Namespace(routeNamespace))),
 			Name:      string(parentRef.Name),
 		}
-		listeners = append(listeners, i.byGateway[key]...)
+
+		dst = append(dst, i.byGateway[key]...)
 	}
 
-	return listeners
+	return dst
 }
 
 // RegisterFilterFuncs registers an allowed Group, Kind, and builder for the Filter ExtensionRef objects.
@@ -269,7 +266,7 @@ func (p *Provider) Provide(configurationChan chan<- dynamic.Message, pool *safe.
 						confHash, err := hashstructure.Hash(conf, nil)
 						switch {
 						case err != nil:
-							logger.Error().Msg("Unable to hash the configuration")
+							logger.Error().Err(err).Msg("Unable to hash the configuration")
 						case p.lastConfiguration.Get() == confHash:
 							logger.Debug().Msgf("Skipping Kubernetes event kind %T", event)
 						default:
@@ -281,7 +278,7 @@ func (p *Provider) Provide(configurationChan chan<- dynamic.Message, pool *safe.
 						}
 
 						// Flush regardless of whether the dynamic configuration changed: the
-						// statusReport is independent of confHash and may carry writes even
+						// statusReport is independent of data-plane changes and may carry writes even
 						// when the data plane has nothing new to consume (e.g. a GatewayClass
 						// that's now Accepted but has no Gateway pointing at it yet).
 						statusReport.Flush(ctxLog, p.client)
@@ -919,6 +916,40 @@ type backendAddress struct {
 	Port int32
 }
 
+type backendAddressCache map[backendAddressKey]backendAddressResult
+
+type backendAddressKey struct {
+	namespace string
+	name      string
+	port      gatev1.PortNumber
+}
+
+type backendAddressResult struct {
+	addresses []backendAddress
+	svcPort   corev1.ServicePort
+	err       error
+}
+
+func (c backendAddressCache) getBackendAddresses(p *Provider, namespace string, ref gatev1.BackendRef) ([]backendAddress, corev1.ServicePort, error) {
+	if c == nil {
+		return p.getBackendAddresses(namespace, ref)
+	}
+
+	key := backendAddressKey{
+		namespace: namespace,
+		name:      string(ref.Name),
+		port:      ptr.Deref(ref.Port, gatev1.PortNumber(0)),
+	}
+
+	result, ok := c[key]
+	if !ok {
+		result.addresses, result.svcPort, result.err = p.getBackendAddresses(namespace, ref)
+		c[key] = result
+	}
+
+	return result.addresses, result.svcPort, result.err
+}
+
 func (p *Provider) getBackendAddresses(namespace string, ref gatev1.BackendRef) ([]backendAddress, corev1.ServicePort, error) {
 	if ref.Port == nil {
 		return nil, corev1.ServicePort{}, errors.New("port is required for Kubernetes Service reference")
@@ -1006,6 +1037,33 @@ func (p *Provider) getBackendAddresses(namespace string, ref gatev1.BackendRef) 
 	}
 
 	return backendServers, *svcPort, nil
+}
+
+type backendTLSPolicyCache map[backendTLSPolicyKey]backendTLSPolicyResult
+
+type backendTLSPolicyKey struct {
+	namespace string
+	name      string
+}
+
+type backendTLSPolicyResult struct {
+	policies []*gatev1.BackendTLSPolicy
+	err      error
+}
+
+func (c backendTLSPolicyCache) getBackendTLSPolicies(p *Provider, namespace, serviceName string) ([]*gatev1.BackendTLSPolicy, error) {
+	if c == nil {
+		return p.client.ListBackendTLSPoliciesForService(namespace, serviceName)
+	}
+
+	key := backendTLSPolicyKey{namespace: namespace, name: serviceName}
+	result, ok := c[key]
+	if !ok {
+		result.policies, result.err = p.client.ListBackendTLSPoliciesForService(namespace, serviceName)
+		c[key] = result
+	}
+
+	return result.policies, result.err
 }
 
 func supportedRouteKinds(protocol gatev1.ProtocolType, experimentalChannel bool) ([]gatev1.RouteGroupKind, []metav1.Condition) {
@@ -1140,7 +1198,32 @@ func allowRoute(listener gatewayListener, routeNamespace, routeKind string) bool
 }
 
 func matchingGatewayListeners(gatewayListeners []gatewayListener, routeNamespace string, parentRefs []gatev1.ParentReference) []gatewayListener {
-	return newGatewayListenerIndex(gatewayListeners).matching(routeNamespace, parentRefs)
+	var listeners []gatewayListener
+
+	for _, listener := range gatewayListeners {
+		for _, parentRef := range parentRefs {
+			if ptr.Deref(parentRef.Group, gatev1.GroupName) != gatev1.GroupName {
+				continue
+			}
+
+			if ptr.Deref(parentRef.Kind, kindGateway) != kindGateway {
+				continue
+			}
+
+			parentRefNamespace := string(ptr.Deref(parentRef.Namespace, gatev1.Namespace(routeNamespace)))
+			if listener.GWNamespace != parentRefNamespace {
+				continue
+			}
+
+			if string(parentRef.Name) != listener.GWName {
+				continue
+			}
+
+			listeners = append(listeners, listener)
+		}
+	}
+
+	return listeners
 }
 
 func matchListener(listener gatewayListener, parentRef gatev1.ParentReference) bool {

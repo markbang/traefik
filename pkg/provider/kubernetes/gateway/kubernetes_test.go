@@ -21,8 +21,10 @@ import (
 	"github.com/traefik/traefik/v3/pkg/types"
 	"google.golang.org/grpc/codes"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	discoveryfake "k8s.io/client-go/discovery/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	kscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
@@ -112,6 +114,384 @@ func TestGatewayClassLabelSelector(t *testing.T) {
 
 	assert.Equal(t, gatev1.IPAddressType, *gw.Status.Addresses[0].Type)
 	assert.Equal(t, "1.2.3.4", gw.Status.Addresses[0].Value)
+}
+
+func TestClientListEndpointSlicesForServiceUsesServiceNameIndex(t *testing.T) {
+	k8sObjects := manyEndpointSliceObjects(300, 3)
+	kubeClient := kubefake.NewClientset(k8sObjects...)
+	gwClient := newGatewaySimpleClientSet(t)
+
+	client := newClientImpl(kubeClient, gwClient)
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	eventCh, err := client.WatchAll(nil, stopCh)
+	require.NoError(t, err)
+
+	if len(k8sObjects) > 0 {
+		<-eventCh
+	}
+
+	endpointSlices, err := client.ListEndpointSlicesForService("default", "svc-42")
+	require.NoError(t, err)
+	require.Len(t, endpointSlices, 3)
+
+	for _, endpointSlice := range endpointSlices {
+		assert.Equal(t, "svc-42", endpointSlice.Labels[discoveryv1.LabelServiceName])
+	}
+}
+
+func TestClientStripsManagedFields(t *testing.T) {
+	kubeClient := kubefake.NewClientset(&corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:     "default",
+			Name:          "svc",
+			ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kubectl"}},
+		},
+	})
+	gwClient := newGatewaySimpleClientSet(t, &gatev1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:     "default",
+			Name:          "route",
+			ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kubectl"}},
+		},
+	})
+
+	client := newClientImpl(kubeClient, gwClient)
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	eventCh, err := client.WatchAll(nil, stopCh)
+	require.NoError(t, err)
+
+	<-eventCh
+
+	service, err := client.GetService("default", "svc")
+	require.NoError(t, err)
+	assert.Empty(t, service.ManagedFields)
+
+	routes, err := client.ListHTTPRoutes()
+	require.NoError(t, err)
+	require.Len(t, routes, 1)
+	assert.Empty(t, routes[0].ManagedFields)
+}
+
+func TestClientSkipsMissingTLSRouteCRD(t *testing.T) {
+	kubeClient := kubefake.NewClientset()
+	gwClient := newGatewaySimpleClientSet(t)
+
+	discovery, ok := gwClient.Discovery().(*discoveryfake.FakeDiscovery)
+	require.True(t, ok)
+	discovery.Resources = []*metav1.APIResourceList{{
+		GroupVersion: gatev1.GroupVersion.String(),
+		APIResources: []metav1.APIResource{
+			{Name: "gatewayclasses", Namespaced: false, Kind: "GatewayClass"},
+			{Name: "gateways", Namespaced: true, Kind: "Gateway"},
+			{Name: "httproutes", Namespaced: true, Kind: "HTTPRoute"},
+			{Name: "grpcroutes", Namespaced: true, Kind: "GRPCRoute"},
+			{Name: "backendtlspolicies", Namespaced: true, Kind: "BackendTLSPolicy"},
+		},
+	}}
+
+	client := newClientImpl(kubeClient, gwClient)
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	_, err := client.WatchAll(nil, stopCh)
+	require.NoError(t, err)
+	assert.False(t, client.hasTLSRoutes)
+
+	routes, err := client.ListTLSRoutes()
+	require.NoError(t, err)
+	assert.Empty(t, routes)
+}
+
+func BenchmarkClientListEndpointSlicesForService(b *testing.B) {
+	k8sObjects := manyEndpointSliceObjects(400, 2)
+	kubeClient := kubefake.NewClientset(k8sObjects...)
+	gwClient := gatefake.NewSimpleClientset()
+
+	client := newClientImpl(kubeClient, gwClient)
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	eventCh, err := client.WatchAll(nil, stopCh)
+	require.NoError(b, err)
+
+	if len(k8sObjects) > 0 {
+		<-eventCh
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		endpointSlices, err := client.ListEndpointSlicesForService("default", "svc-200")
+		require.NoError(b, err)
+		require.Len(b, endpointSlices, 2)
+	}
+}
+
+func BenchmarkLoadConfigurationFromGatewaysManyHTTPRoutes(b *testing.B) {
+	k8sObjects, gwObjects := manyHTTPRouteObjects(500, 400, 2)
+	kubeClient := kubefake.NewClientset(k8sObjects...)
+	gwClient := newGatewaySimpleClientSet(b, gwObjects...)
+
+	client := newClientImpl(kubeClient, gwClient)
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	eventCh, err := client.WatchAll(nil, stopCh)
+	require.NoError(b, err)
+
+	if len(k8sObjects) > 0 || len(gwObjects) > 0 {
+		<-eventCh
+	}
+
+	p := Provider{
+		EntryPoints: map[string]Entrypoint{"web": {Address: ":80"}},
+		client:      client,
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		conf, _, err := p.loadConfigurationFromGateways(b.Context())
+		require.NoError(b, err)
+		require.Len(b, conf.HTTP.Routers, 500)
+	}
+}
+
+func BenchmarkLoadConfigurationFromGatewaysManyHTTPRoutesWithBackendTLSPolicies(b *testing.B) {
+	k8sObjects, gwObjects := manyHTTPRouteObjectsWithBackendTLSPolicies(500, 400, 2, 200)
+	kubeClient := kubefake.NewClientset(k8sObjects...)
+	gwClient := newGatewaySimpleClientSet(b, gwObjects...)
+
+	client := newClientImpl(kubeClient, gwClient)
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	eventCh, err := client.WatchAll(nil, stopCh)
+	require.NoError(b, err)
+
+	if len(k8sObjects) > 0 || len(gwObjects) > 0 {
+		<-eventCh
+	}
+
+	p := Provider{
+		EntryPoints: map[string]Entrypoint{"web": {Address: ":80"}},
+		client:      client,
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		conf, _, err := p.loadConfigurationFromGateways(b.Context())
+		require.NoError(b, err)
+		require.Len(b, conf.HTTP.Routers, 500)
+	}
+}
+
+func BenchmarkGatewayListenerIndexMatching(b *testing.B) {
+	const (
+		gatewayCount       = 500
+		listenerPerGateway = 4
+		routeCount         = 10000
+	)
+
+	var gatewayListeners []gatewayListener
+	for gi := range gatewayCount {
+		for li := range listenerPerGateway {
+			gatewayListeners = append(gatewayListeners, gatewayListener{
+				Name:        fmt.Sprintf("listener-%d", li),
+				GWName:      fmt.Sprintf("gateway-%d", gi),
+				GWNamespace: "default",
+			})
+		}
+	}
+
+	parentRefs := make([][]gatev1.ParentReference, routeCount)
+	for i := range routeCount {
+		parentRefs[i] = []gatev1.ParentReference{{
+			Name: gatev1.ObjectName(fmt.Sprintf("gateway-%d", i%gatewayCount)),
+		}}
+	}
+
+	listenerIndex := newGatewayListenerIndex(gatewayListeners)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	var total int
+	var listeners []gatewayListener
+	for range b.N {
+		total = 0
+		for _, routeParentRefs := range parentRefs {
+			listeners = listenerIndex.matchingInto(listeners[:0], "default", routeParentRefs)
+			total += len(listeners)
+		}
+	}
+
+	if total != routeCount*listenerPerGateway {
+		b.Fatalf("unexpected listener count: %d", total)
+	}
+}
+
+func manyEndpointSliceObjects(serviceCount, slicesPerService int) []runtime.Object {
+	objects := make([]runtime.Object, 0, serviceCount+serviceCount*slicesPerService)
+	ready := true
+	portName := "http"
+	port := int32(80)
+
+	for i := range serviceCount {
+		serviceName := fmt.Sprintf("svc-%d", i)
+		objects = append(objects, &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      serviceName,
+			},
+			Spec: corev1.ServiceSpec{
+				Ports: []corev1.ServicePort{{
+					Name: portName,
+					Port: port,
+				}},
+			},
+		})
+
+		for j := range slicesPerService {
+			objects = append(objects, &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      fmt.Sprintf("%s-%d", serviceName, j),
+					Labels: map[string]string{
+						discoveryv1.LabelServiceName: serviceName,
+					},
+				},
+				Ports: []discoveryv1.EndpointPort{{
+					Name: &portName,
+					Port: &port,
+				}},
+				Endpoints: []discoveryv1.Endpoint{{
+					Addresses: []string{fmt.Sprintf("10.0.%d.%d", i, j+1)},
+					Conditions: discoveryv1.EndpointConditions{
+						Ready: &ready,
+					},
+				}},
+			})
+		}
+	}
+
+	return objects
+}
+
+func manyHTTPRouteObjects(routeCount, serviceCount, slicesPerService int) ([]runtime.Object, []runtime.Object) {
+	k8sObjects := manyEndpointSliceObjects(serviceCount, slicesPerService)
+
+	gatewayClassName := gatev1.ObjectName("traefik")
+	listenerName := gatev1.SectionName("web")
+	pathType := gatev1.PathMatchPathPrefix
+	port := gatev1.PortNumber(80)
+
+	gwObjects := []runtime.Object{
+		&gatev1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: string(gatewayClassName),
+			},
+			Spec: gatev1.GatewayClassSpec{
+				ControllerName: controllerName,
+			},
+		},
+		&gatev1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "my-gateway",
+			},
+			Spec: gatev1.GatewaySpec{
+				GatewayClassName: gatewayClassName,
+				Listeners: []gatev1.Listener{{
+					Name:     listenerName,
+					Port:     port,
+					Protocol: gatev1.HTTPProtocolType,
+				}},
+			},
+		},
+	}
+
+	for i := range routeCount {
+		path := fmt.Sprintf("/route-%d", i)
+		gwObjects = append(gwObjects, &gatev1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      fmt.Sprintf("http-route-%d", i),
+			},
+			Spec: gatev1.HTTPRouteSpec{
+				CommonRouteSpec: gatev1.CommonRouteSpec{
+					ParentRefs: []gatev1.ParentReference{{
+						Name:        "my-gateway",
+						SectionName: &listenerName,
+					}},
+				},
+				Rules: []gatev1.HTTPRouteRule{{
+					Matches: []gatev1.HTTPRouteMatch{{
+						Path: &gatev1.HTTPPathMatch{
+							Type:  &pathType,
+							Value: &path,
+						},
+					}},
+					BackendRefs: []gatev1.HTTPBackendRef{{
+						BackendRef: gatev1.BackendRef{
+							BackendObjectReference: gatev1.BackendObjectReference{
+								Name: "svc-0",
+								Port: &port,
+							},
+						},
+					}},
+				}},
+			},
+		})
+	}
+
+	return k8sObjects, gwObjects
+}
+
+func manyHTTPRouteObjectsWithBackendTLSPolicies(routeCount, serviceCount, slicesPerService, policyCount int) ([]runtime.Object, []runtime.Object) {
+	k8sObjects, gwObjects := manyHTTPRouteObjects(routeCount, serviceCount, slicesPerService)
+	port := gatev1.PortNumber(80)
+	serviceName := gatev1.ObjectName("svc-0")
+	for i := range policyCount {
+		gwObjects = append(gwObjects, &gatev1.BackendTLSPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:         "default",
+				Name:              fmt.Sprintf("policy-%d", i),
+				CreationTimestamp: metav1.NewTime(time.Unix(int64(i), 0)),
+			},
+			Spec: gatev1.BackendTLSPolicySpec{
+				TargetRefs: []gatev1.LocalPolicyTargetReferenceWithSectionName{{
+					LocalPolicyTargetReference: gatev1.LocalPolicyTargetReference{
+						Group: gatev1.Group("core"),
+						Kind:  gatev1.Kind("Service"),
+						Name:  serviceName,
+					},
+					SectionName: ptr.To(gatev1.SectionName("http")),
+				}},
+				Validation: gatev1.BackendTLSPolicyValidation{
+					CACertificateRefs: []gatev1.LocalObjectReference{{
+						Name: "ca",
+					}},
+				},
+			},
+		})
+	}
+
+	// Keep the benchmark setup self-contained with a valid service annotation and port match.
+	_ = port
+
+	return k8sObjects, gwObjects
 }
 
 func TestLoadHTTPRoutes(t *testing.T) {
@@ -7793,51 +8173,6 @@ func Test_matchingGatewayListener(t *testing.T) {
 	}
 }
 
-func BenchmarkGatewayListenerIndexMatching(b *testing.B) {
-	const (
-		gatewayCount       = 500
-		listenerPerGateway = 4
-		routeCount         = 10000
-	)
-
-	var gatewayListeners []gatewayListener
-	for gi := range gatewayCount {
-		for li := range listenerPerGateway {
-			gatewayListeners = append(gatewayListeners, gatewayListener{
-				Name:        fmt.Sprintf("listener-%d", li),
-				GWName:      fmt.Sprintf("gateway-%d", gi),
-				GWNamespace: "default",
-			})
-		}
-	}
-
-	parentRefs := make([][]gatev1.ParentReference, routeCount)
-	for i := range routeCount {
-		parentRefs[i] = []gatev1.ParentReference{{
-			Name: gatev1.ObjectName(fmt.Sprintf("gateway-%d", i%gatewayCount)),
-		}}
-	}
-
-	listenerIndex := newGatewayListenerIndex(gatewayListeners)
-
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	var total int
-	var listeners []gatewayListener
-	for range b.N {
-		total = 0
-		for _, routeParentRefs := range parentRefs {
-			listeners = listenerIndex.matchingInto(listeners[:0], "default", routeParentRefs)
-			total += len(listeners)
-		}
-	}
-
-	if total != routeCount*listenerPerGateway {
-		b.Fatalf("unexpected listener count: %d", total)
-	}
-}
-
 func Test_matchListener(t *testing.T) {
 	testCases := []struct {
 		desc       string
@@ -8773,7 +9108,7 @@ func Test_upsertRouteConditionResolvedRefs(t *testing.T) {
 }
 
 // We cannot use the gateway-api fake.NewClientset due to Gateway being pluralized as "gatewaies" instead of "gateways".
-func newGatewaySimpleClientSet(t *testing.T, objects ...runtime.Object) *gatefake.Clientset {
+func newGatewaySimpleClientSet(t testing.TB, objects ...runtime.Object) *gatefake.Clientset {
 	t.Helper()
 
 	client := gatefake.NewSimpleClientset(objects...)
