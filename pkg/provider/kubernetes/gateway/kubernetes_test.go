@@ -9108,8 +9108,8 @@ func Test_upsertRouteConditionResolvedRefs(t *testing.T) {
 }
 
 // We cannot use the gateway-api fake.NewClientset due to Gateway being pluralized as "gatewaies" instead of "gateways".
-func newGatewaySimpleClientSet(t testing.TB, objects ...runtime.Object) *gatefake.Clientset {
-	t.Helper()
+func newGatewaySimpleClientSet(tb testing.TB, objects ...runtime.Object) *gatefake.Clientset {
+	tb.Helper()
 
 	client := gatefake.NewSimpleClientset(objects...)
 	for _, object := range objects {
@@ -9118,8 +9118,8 @@ func newGatewaySimpleClientSet(t testing.TB, objects ...runtime.Object) *gatefak
 			continue
 		}
 
-		_, err := client.GatewayV1().Gateways(gateway.Namespace).Create(t.Context(), gateway, metav1.CreateOptions{})
-		require.NoError(t, err)
+		_, err := client.GatewayV1().Gateways(gateway.Namespace).Create(tb.Context(), gateway, metav1.CreateOptions{})
+		require.NoError(tb, err)
 	}
 
 	return client

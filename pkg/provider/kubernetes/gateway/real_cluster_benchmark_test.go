@@ -99,21 +99,21 @@ func TestRealClusterSnapshotLoadConfiguration(t *testing.T) {
 	t.Logf("httpRouters=%d httpServices=%d httpRouteStatuses=%d", len(conf.HTTP.Routers), len(conf.HTTP.Services), len(statusReport.httpRoutes))
 }
 
-func newRealClusterSnapshotProvider(t testing.TB) *Provider {
-	t.Helper()
+func newRealClusterSnapshotProvider(tb testing.TB) *Provider {
+	tb.Helper()
 
-	k8sObjects, gwObjects := readRealClusterSnapshotObjects(t)
+	k8sObjects, gwObjects := readRealClusterSnapshotObjects(tb)
 	kubeClient := kubefake.NewClientset(k8sObjects...)
-	gwClient := newGatewaySimpleClientSet(t, gwObjects...)
+	gwClient := newGatewaySimpleClientSet(tb, gwObjects...)
 
 	client := newClientImpl(kubeClient, gwClient)
 	stopCh := make(chan struct{})
-	t.Cleanup(func() {
+	tb.Cleanup(func() {
 		close(stopCh)
 	})
 
 	_, err := client.WatchAll(nil, stopCh)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	return &Provider{
 		EntryPoints: map[string]Entrypoint{
@@ -124,16 +124,16 @@ func newRealClusterSnapshotProvider(t testing.TB) *Provider {
 	}
 }
 
-func readRealClusterSnapshotObjects(t testing.TB) ([]runtime.Object, []runtime.Object) {
-	t.Helper()
+func readRealClusterSnapshotObjects(tb testing.TB) ([]runtime.Object, []runtime.Object) {
+	tb.Helper()
 
 	path := os.Getenv(realClusterSnapshotEnv)
 	if path == "" {
-		t.Skipf("%s is not set", realClusterSnapshotEnv)
+		tb.Skipf("%s is not set", realClusterSnapshotEnv)
 	}
 
 	file, err := os.Open(path)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	defer file.Close()
 
 	var k8sObjects []runtime.Object
@@ -148,7 +148,7 @@ func readRealClusterSnapshotObjects(t testing.TB) ([]runtime.Object, []runtime.O
 		}
 
 		obj, gvk, err := kscheme.Codecs.UniversalDeserializer().Decode(line, nil, nil)
-		require.NoError(t, err)
+		require.NoError(tb, err)
 
 		if gvk.Group == groupGateway {
 			gwObjects = append(gwObjects, obj)
@@ -157,14 +157,14 @@ func readRealClusterSnapshotObjects(t testing.TB) ([]runtime.Object, []runtime.O
 
 		k8sObjects = append(k8sObjects, obj)
 	}
-	require.NoError(t, scanner.Err())
-	require.NotEmpty(t, gwObjects)
+	require.NoError(tb, scanner.Err())
+	require.NotEmpty(tb, gwObjects)
 
 	return k8sObjects, gwObjects
 }
 
-func firstObject[T any](t testing.TB, objects []runtime.Object) T {
-	t.Helper()
+func firstObject[T any](tb testing.TB, objects []runtime.Object) T {
+	tb.Helper()
 
 	for _, obj := range objects {
 		if typed, ok := obj.(T); ok {
@@ -173,7 +173,7 @@ func firstObject[T any](t testing.TB, objects []runtime.Object) T {
 	}
 
 	var zero T
-	require.Failf(t, "object not found", "object type %T", zero)
+	require.Failf(tb, "object not found", "object type %T", zero)
 	return zero
 }
 
