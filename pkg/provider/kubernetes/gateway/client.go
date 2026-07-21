@@ -16,7 +16,6 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/selection"
 	ktypes "k8s.io/apimachinery/pkg/types"
 	kinformers "k8s.io/client-go/informers"
 	kclientset "k8s.io/client-go/kubernetes"
@@ -47,6 +46,10 @@ type clientWrapper struct {
 
 	labelSelector       string
 	experimentalChannel bool
+
+	hasGRPCRoutes         bool
+	hasTLSRoutes          bool
+	hasBackendTLSPolicies bool
 }
 
 func createClientFromConfig(c *rest.Config, qps, burst int) (*clientWrapper, error) {
@@ -68,11 +71,14 @@ func createClientFromConfig(c *rest.Config, qps, burst int) (*clientWrapper, err
 
 func newClientImpl(csKube kclientset.Interface, csGateway gateclientset.Interface) *clientWrapper {
 	return &clientWrapper{
-		csGateway:        csGateway,
-		csKube:           csKube,
-		factoriesGateway: make(map[string]gateinformers.SharedInformerFactory),
-		factoriesKube:    make(map[string]kinformers.SharedInformerFactory),
-		factoriesSecret:  make(map[string]kinformers.SharedInformerFactory),
+		csGateway:             csGateway,
+		csKube:                csKube,
+		factoriesGateway:      make(map[string]gateinformers.SharedInformerFactory),
+		factoriesKube:         make(map[string]kinformers.SharedInformerFactory),
+		factoriesSecret:       make(map[string]kinformers.SharedInformerFactory),
+		hasGRPCRoutes:         true,
+		hasTLSRoutes:          true,
+		hasBackendTLSPolicies: true,
 	}
 }
 
@@ -148,30 +154,59 @@ func (c *clientWrapper) WatchAll(namespaces []string, stopCh <-chan struct{}) (<
 		options.LabelSelector = c.labelSelector
 	}
 
-	c.factoryNamespace = kinformers.NewSharedInformerFactory(c.csKube, resyncPeriod)
+	c.hasGRPCRoutes = true
+	c.hasTLSRoutes = true
+	c.hasBackendTLSPolicies = true
+	if resources, err := c.csGateway.Discovery().ServerResourcesForGroupVersion(gatev1.GroupVersion.String()); err == nil {
+		c.hasGRPCRoutes = hasAPIResource(resources, "grpcroutes")
+		c.hasTLSRoutes = hasAPIResource(resources, "tlsroutes")
+		c.hasBackendTLSPolicies = hasAPIResource(resources, "backendtlspolicies")
+	}
+
+	c.factoryNamespace = kinformers.NewSharedInformerFactoryWithOptions(c.csKube, resyncPeriod, kinformers.WithTransform(k8s.StripManagedFields))
 	_, err := c.factoryNamespace.Core().V1().Namespaces().Informer().AddEventHandler(eventHandler)
 	if err != nil {
 		return nil, err
 	}
 
-	c.factoryGatewayClass = gateinformers.NewSharedInformerFactoryWithOptions(c.csGateway, resyncPeriod, gateinformers.WithTweakListOptions(labelSelectorOptions))
+	c.factoryGatewayClass = gateinformers.NewSharedInformerFactoryWithOptions(
+		c.csGateway,
+		resyncPeriod,
+		gateinformers.WithTweakListOptions(labelSelectorOptions),
+		gateinformers.WithTransform(k8s.StripManagedFields),
+	)
 	_, err = c.factoryGatewayClass.Gateway().V1().GatewayClasses().Informer().AddEventHandler(eventHandler)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, ns := range namespaces {
-		factoryKube := kinformers.NewSharedInformerFactoryWithOptions(c.csKube, resyncPeriod, kinformers.WithNamespace(ns))
+		factoryKube := kinformers.NewSharedInformerFactoryWithOptions(
+			c.csKube,
+			resyncPeriod,
+			kinformers.WithNamespace(ns),
+			kinformers.WithTransform(k8s.StripManagedFields),
+		)
 		_, err = factoryKube.Core().V1().Services().Informer().AddEventHandler(eventHandler)
 		if err != nil {
 			return nil, err
 		}
-		_, err = factoryKube.Discovery().V1().EndpointSlices().Informer().AddEventHandler(eventHandler)
+		endpointSliceInformer := factoryKube.Discovery().V1().EndpointSlices().Informer()
+		err = endpointSliceInformer.AddIndexers(k8s.EndpointSliceServiceNameIndexers)
+		if err != nil {
+			return nil, err
+		}
+		_, err = endpointSliceInformer.AddEventHandler(eventHandler)
 		if err != nil {
 			return nil, err
 		}
 
-		factoryGateway := gateinformers.NewSharedInformerFactoryWithOptions(c.csGateway, resyncPeriod, gateinformers.WithNamespace(ns))
+		factoryGateway := gateinformers.NewSharedInformerFactoryWithOptions(
+			c.csGateway,
+			resyncPeriod,
+			gateinformers.WithNamespace(ns),
+			gateinformers.WithTransform(k8s.StripManagedFields),
+		)
 		_, err = factoryGateway.Gateway().V1().Gateways().Informer().AddEventHandler(eventHandler)
 		if err != nil {
 			return nil, err
@@ -180,26 +215,37 @@ func (c *clientWrapper) WatchAll(namespaces []string, stopCh <-chan struct{}) (<
 		if err != nil {
 			return nil, err
 		}
-		_, err = factoryGateway.Gateway().V1().GRPCRoutes().Informer().AddEventHandler(eventHandler)
-		if err != nil {
-			return nil, err
+		if c.hasGRPCRoutes {
+			_, err = factoryGateway.Gateway().V1().GRPCRoutes().Informer().AddEventHandler(eventHandler)
+			if err != nil {
+				return nil, err
+			}
 		}
 		_, err = factoryGateway.Gateway().V1beta1().ReferenceGrants().Informer().AddEventHandler(eventHandler)
 		if err != nil {
 			return nil, err
 		}
-		_, err = factoryGateway.Gateway().V1().BackendTLSPolicies().Informer().AddEventHandler(eventHandler)
-		if err != nil {
-			return nil, err
+		if c.hasBackendTLSPolicies {
+			backendTLSPolicyInformer := factoryGateway.Gateway().V1().BackendTLSPolicies().Informer()
+			err = backendTLSPolicyInformer.AddIndexers(k8s.BackendTLSPolicyServiceNameIndexers)
+			if err != nil {
+				return nil, err
+			}
+			_, err = backendTLSPolicyInformer.AddEventHandler(eventHandler)
+			if err != nil {
+				return nil, err
+			}
 		}
 		_, err = factoryKube.Core().V1().ConfigMaps().Informer().AddEventHandler(eventHandler)
 		if err != nil {
 			return nil, err
 		}
 
-		_, err = factoryGateway.Gateway().V1().TLSRoutes().Informer().AddEventHandler(eventHandler)
-		if err != nil {
-			return nil, err
+		if c.hasTLSRoutes {
+			_, err = factoryGateway.Gateway().V1().TLSRoutes().Informer().AddEventHandler(eventHandler)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		if c.experimentalChannel {
@@ -209,7 +255,13 @@ func (c *clientWrapper) WatchAll(namespaces []string, stopCh <-chan struct{}) (<
 			}
 		}
 
-		factorySecret := kinformers.NewSharedInformerFactoryWithOptions(c.csKube, resyncPeriod, kinformers.WithNamespace(ns), kinformers.WithTweakListOptions(notOwnedByHelm))
+		factorySecret := kinformers.NewSharedInformerFactoryWithOptions(
+			c.csKube,
+			resyncPeriod,
+			kinformers.WithNamespace(ns),
+			kinformers.WithTweakListOptions(notOwnedByHelm),
+			kinformers.WithTransform(k8s.StripManagedFields),
+		)
 		_, err = factorySecret.Core().V1().Secrets().Informer().AddEventHandler(eventHandler)
 		if err != nil {
 			return nil, err
@@ -264,6 +316,12 @@ func (c *clientWrapper) WatchAll(namespaces []string, stopCh <-chan struct{}) (<
 	return eventCh, nil
 }
 
+func hasAPIResource(resources *metav1.APIResourceList, resourceName string) bool {
+	return slices.ContainsFunc(resources.APIResources, func(resource metav1.APIResource) bool {
+		return resource.Name == resourceName
+	})
+}
+
 func (c *clientWrapper) ListNamespaces(selector labels.Selector) ([]string, error) {
 	ns, err := c.factoryNamespace.Core().V1().Namespaces().Lister().List(selector)
 	if err != nil {
@@ -296,6 +354,10 @@ func (c *clientWrapper) ListHTTPRoutes() ([]*gatev1.HTTPRoute, error) {
 }
 
 func (c *clientWrapper) ListGRPCRoutes() ([]*gatev1.GRPCRoute, error) {
+	if !c.hasGRPCRoutes {
+		return nil, nil
+	}
+
 	var grpcRoutes []*gatev1.GRPCRoute
 	for _, namespace := range c.watchedNamespaces {
 		routes, err := c.factoriesGateway[c.lookupNamespace(namespace)].Gateway().V1().GRPCRoutes().Lister().GRPCRoutes(namespace).List(labels.Everything())
@@ -324,6 +386,10 @@ func (c *clientWrapper) ListTCPRoutes() ([]*gatev1alpha2.TCPRoute, error) {
 }
 
 func (c *clientWrapper) ListTLSRoutes() ([]*gatev1.TLSRoute, error) {
+	if !c.hasTLSRoutes {
+		return nil, nil
+	}
+
 	var tlsRoutes []*gatev1.TLSRoute
 	for _, namespace := range c.watchedNamespaces {
 		routes, err := c.factoriesGateway[c.lookupNamespace(namespace)].Gateway().V1().TLSRoutes().Lister().TLSRoutes(namespace).List(labels.Everything())
@@ -375,37 +441,52 @@ func (c *clientWrapper) ListEndpointSlicesForService(namespace, serviceName stri
 		return nil, fmt.Errorf("failed to get endpointslices for service %s/%s: namespace is not within watched namespaces", namespace, serviceName)
 	}
 
-	serviceLabelRequirement, err := labels.NewRequirement(discoveryv1.LabelServiceName, selection.Equals, []string{serviceName})
+	objs, err := c.factoriesKube[c.lookupNamespace(namespace)].Discovery().V1().EndpointSlices().Informer().GetIndexer().ByIndex(
+		k8s.EndpointSliceServiceNameIndex,
+		k8s.EndpointSliceServiceNameIndexKey(namespace, serviceName),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create service label selector requirement: %w", err)
+		return nil, fmt.Errorf("failed to get indexed endpointslices for service %s/%s: %w", namespace, serviceName, err)
 	}
-	serviceSelector := labels.NewSelector()
-	serviceSelector = serviceSelector.Add(*serviceLabelRequirement)
 
-	return c.factoriesKube[c.lookupNamespace(namespace)].Discovery().V1().EndpointSlices().Lister().EndpointSlices(namespace).List(serviceSelector)
+	endpointSlices := make([]*discoveryv1.EndpointSlice, 0, len(objs))
+	for _, obj := range objs {
+		endpointSlice, ok := obj.(*discoveryv1.EndpointSlice)
+		if !ok {
+			return nil, fmt.Errorf("unexpected endpointslice index object type %T", obj)
+		}
+
+		endpointSlices = append(endpointSlices, endpointSlice)
+	}
+
+	return endpointSlices, nil
 }
 
 // ListBackendTLSPoliciesForService returns the BackendTLSPolicy for the given service name in the given namespace.
 func (c *clientWrapper) ListBackendTLSPoliciesForService(namespace, serviceName string) ([]*gatev1.BackendTLSPolicy, error) {
+	if !c.hasBackendTLSPolicies {
+		return nil, nil
+	}
+
 	if !c.isWatchedNamespace(namespace) {
 		return nil, fmt.Errorf("failed to get BackendTLSPolicies for service %s/%s: namespace is not within watched namespaces", namespace, serviceName)
 	}
 
-	policies, err := c.factoriesGateway[c.lookupNamespace(namespace)].Gateway().V1().BackendTLSPolicies().Lister().BackendTLSPolicies(namespace).List(labels.Everything())
+	objs, err := c.factoriesGateway[c.lookupNamespace(namespace)].Gateway().V1().BackendTLSPolicies().Informer().GetIndexer().ByIndex(
+		k8s.BackendTLSPolicyServiceNameIndex,
+		k8s.BackendTLSPolicyServiceNameIndexKey(namespace, serviceName),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list BackendTLSPolicies in namespace %s", namespace)
+		return nil, fmt.Errorf("failed to get indexed BackendTLSPolicies for service %s/%s: %w", namespace, serviceName, err)
 	}
 
-	var servicePolicies []*gatev1.BackendTLSPolicy
-	for _, policy := range policies {
-		for _, ref := range policy.Spec.TargetRefs {
-			// The policy does not target the service.
-			if (ref.Group != "" && ref.Group != groupCore) || ref.Kind != kindService || string(ref.Name) != serviceName {
-				continue
-			}
-
-			servicePolicies = append(servicePolicies, policy)
+	servicePolicies := make([]*gatev1.BackendTLSPolicy, 0, len(objs))
+	for _, obj := range objs {
+		policy, ok := obj.(*gatev1.BackendTLSPolicy)
+		if !ok {
+			return nil, fmt.Errorf("unexpected BackendTLSPolicy index object type %T", obj)
 		}
+		servicePolicies = append(servicePolicies, policy)
 	}
 
 	return servicePolicies, nil
