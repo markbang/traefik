@@ -59,8 +59,11 @@ func (p *Provider) loadHTTPRoutes(ctx context.Context, listenerIndex gatewayList
 					},
 				},
 			}
+			var fallbackListener *gatewayListener
+			var routeLoaded bool
 
-			for _, listener := range routeListeners {
+			for i := range routeListeners {
+				listener := routeListeners[i]
 				accepted := matchListener(listener, parentRef)
 
 				if accepted && !allowRoute(listener, route.Namespace, kindHTTPRoute) {
@@ -71,6 +74,12 @@ func (p *Provider) loadHTTPRoutes(ctx context.Context, listenerIndex gatewayList
 				if accepted && !ok {
 					parentStatus.Conditions = updateRouteConditionAccepted(parentStatus.Conditions, string(gatev1.RouteReasonNoMatchingListenerHostname))
 					accepted = false
+				}
+				if !ok {
+					if fallbackListener == nil {
+						fallbackListener = &routeListeners[i]
+					}
+					continue
 				}
 
 				if accepted {
@@ -83,10 +92,17 @@ func (p *Provider) loadHTTPRoutes(ctx context.Context, listenerIndex gatewayList
 				}
 
 				routeConf, resolveRefCondition := p.loadHTTPRoute(logger.WithContext(ctx), listener, route, hostnames, statusReport, backendAddressCache, backendTLSPolicyCache)
+				routeLoaded = true
 				if accepted && listener.Attached {
 					mergeHTTPConfiguration(routeConf, conf)
 				}
 
+				parentStatus.Conditions = upsertRouteConditionResolvedRefs(parentStatus.Conditions, resolveRefCondition)
+			}
+
+			// ResolvedRefs is independent from hostname acceptance and must still be reported.
+			if !routeLoaded && fallbackListener != nil {
+				_, resolveRefCondition := p.loadHTTPRoute(logger.WithContext(ctx), *fallbackListener, route, nil, statusReport, backendAddressCache, backendTLSPolicyCache)
 				parentStatus.Conditions = upsertRouteConditionResolvedRefs(parentStatus.Conditions, resolveRefCondition)
 			}
 

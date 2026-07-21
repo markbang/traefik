@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	ptypes "github.com/traefik/paerser/types"
@@ -3140,6 +3142,80 @@ func TestLoadHTTPRoutes(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, test.expected, conf)
+		})
+	}
+}
+
+func TestLoadHTTPRoutesSkipsListenersWithMismatchedHostname(t *testing.T) {
+	testCases := []struct {
+		desc            string
+		hostname        gatev1.Hostname
+		expectedRouters int
+	}{
+		{
+			desc:            "One matching listener",
+			hostname:        "foo.example.com",
+			expectedRouters: 1,
+		},
+		{
+			desc:     "No matching listener",
+			hostname: "foo.invalid",
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			k8sObjects, gwObjects := readResources(t, []string{"httproute/with_mismatched_listener_hostname.yml"})
+			for _, obj := range gwObjects {
+				route, ok := obj.(*gatev1.HTTPRoute)
+				if ok {
+					route.Spec.Hostnames = []gatev1.Hostname{test.hostname}
+				}
+			}
+
+			kubeClient := kubefake.NewClientset(k8sObjects...)
+			gwClient := newGatewaySimpleClientSet(t, gwObjects...)
+
+			client := newClientImpl(kubeClient, gwClient)
+			stopCh := make(chan struct{})
+			t.Cleanup(func() {
+				close(stopCh)
+			})
+
+			eventCh, err := client.WatchAll(nil, stopCh)
+			require.NoError(t, err)
+			<-eventCh
+
+			p := Provider{
+				EntryPoints: map[string]Entrypoint{
+					"web": {Address: ":80"},
+				},
+				client: client,
+			}
+
+			var output bytes.Buffer
+			logger := zerolog.New(&output)
+			conf, statusReport, err := p.loadConfigurationFromGateways(logger.WithContext(t.Context()))
+			require.NoError(t, err)
+
+			assert.Len(t, conf.HTTP.Routers, test.expectedRouters)
+			assert.Equal(t, 1, strings.Count(output.String(), "Unable to load HTTPRoute backend"))
+			require.Len(t, statusReport.httpRoutes, 1)
+
+			for _, routeStatus := range statusReport.httpRoutes {
+				require.Len(t, routeStatus.Parents, 1)
+
+				var resolvedRefs *metav1.Condition
+				for _, condition := range routeStatus.Parents[0].Conditions {
+					if condition.Type == string(gatev1.RouteConditionResolvedRefs) {
+						resolvedRefs = &condition
+						break
+					}
+				}
+
+				require.NotNil(t, resolvedRefs)
+				assert.Equal(t, metav1.ConditionFalse, resolvedRefs.Status)
+			}
 		})
 	}
 }
